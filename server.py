@@ -1,20 +1,46 @@
-import os, asyncio, websockets
+# server.py
+import os
+import asyncio
+from aiohttp import web, WSMsgType
 
-PORT = int(os.environ.get("PORT", 3000))
-connected_clients = set()
+clients = set()
 
-async def handler(websocket, path):
-    connected_clients.add(websocket)
+async def index(request):
+    return web.Response(text="OK")  # Render health check / root
+
+async def websocket_handler(request):
+    ws = web.WebSocketResponse()
+    await ws.prepare(request)
+
+    clients.add(ws)
+    print("Client connected. Total:", len(clients))
     try:
-        async for message in websocket:
-            print(f"Received: {message}")
-            await asyncio.gather(*[ws.send(message) for ws in connected_clients])
+        async for msg in ws:
+            if msg.type == WSMsgType.TEXT:
+                text = msg.data.strip()
+                if not text:
+                    continue
+                # broadcast to all connected clients (skip closed)
+                coros = []
+                for c in list(clients):
+                    if c.closed:
+                        clients.discard(c)
+                        continue
+                    coros.append(c.send_str(text))
+                if coros:
+                    await asyncio.gather(*coros, return_exceptions=True)
+            elif msg.type == WSMsgType.ERROR:
+                print("WS connection error:", ws.exception())
     finally:
-        connected_clients.remove(websocket)
+        clients.discard(ws)
+        print("Client disconnected. Total:", len(clients))
+    return ws
 
-async def main():
-    async with websockets.serve(handler, "0.0.0.0", PORT):
-        print(f"Server running on ws://0.0.0.0:{PORT}")
-        await asyncio.Future()
+if __name__ == "__main__":
+    PORT = int(os.environ.get("PORT", 3000))
+    app = web.Application()
+    app.router.add_get("/", index)
+    app.router.add_get("/ws", websocket_handler)
 
-asyncio.run(main())
+    print("Starting on 0.0.0.0:%d" % PORT)
+    web.run_app(app, host="0.0.0.0", port=PORT)
